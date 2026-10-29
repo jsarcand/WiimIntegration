@@ -147,7 +147,7 @@ my @LINEOUT_MODES = (
 );
 
 sub getDisplayName { 'PLUGIN_WIIMINTEGRATION' }
-sub getVersion     { '1.0.48' }
+sub getVersion     { '1.0.49' }
 
 # project / priv_prj from getStatusEx. Longer names are tested first.
 # Unknown projects keep the streamer jacks and omit HDMI, which the bitmask
@@ -1049,7 +1049,7 @@ sub initPlugin {
         refresh_on        => \&_dlnaRefreshOn,
         base_url          => \&_lmsListenBaseUrl,
     });
-    $log->warn("Wiim Integration v1.0.48 loaded");
+    $log->warn("Wiim Integration v1.0.49 loaded");
 
     foreach my $client (Slim::Player::Client::clients()) {
         _registerWiimPlayer($client);
@@ -3454,16 +3454,24 @@ sub _dlnaIsOwnRenderer {
 }
 
 sub _dlnaCandidates {
-    my @out;
+    my $with_groups = shift;
+    my (@players, @groups);
     foreach my $client (Slim::Player::Client::clients()) {
         next if !$client || $client->disconnected();
         next if isWiimPlayer($client);
         next if _dlnaIsOwnRenderer($client);
         my $model = eval { $client->model() } || '';
-        next if $model eq 'group';
-        push @out, $client;
+        if ($model eq 'group') {
+            push @groups, $client if $with_groups;
+            next;
+        }
+        push @players, $client;
     }
-    return sort { lc($a->name() || '') cmp lc($b->name() || '') } @out;
+    my $by_name = sub { lc($a->name() || '') cmp lc($b->name() || '') };
+    @players = sort $by_name @players;
+    return @players unless $with_groups;
+    @groups = sort $by_name @groups;
+    return (@players, @groups);
 }
 
 sub _dlnaCurrentUrl {
@@ -5553,7 +5561,7 @@ sub _diffuseActiveDests {
     my $wid = lc($wiim && $wiim->id() || '');
     return unless $wid;
     my @out;
-    for my $dest (_dlnaCandidates()) {
+    for my $dest (_dlnaCandidates(1)) {
         my $play = _destPlayingRelay($dest, $wid);
         my $hold = $play || _destHoldingRelay($dest, $wid);
         my $queued = ($scan_queue && !$hold && _playlistHasRelay($dest, $wid)) ? 1 : 0;
@@ -5576,7 +5584,7 @@ sub _diffuseReset {
     return unless isWiimPlayer($wiim);
     my $id = $wiim->id() || return;
     my $wid = lc $id;
-    for my $dest (_dlnaCandidates()) {
+    for my $dest (_dlnaCandidates(1)) {
         my $did = lc($dest->id() || '');
         next unless $did;
         my $has = _playlistHasRelay($dest, $wid) || _destHoldingRelay($dest, $wid);
@@ -5620,7 +5628,7 @@ sub diffuseCommand {
     my $dest_id = lc($request->getParam('_dest') || $request->getRequest(2) || '');
     $dest_id =~ s/\s+//g;
     my $dest;
-    for my $cand (_dlnaCandidates()) {
+    for my $cand (_dlnaCandidates(1)) {
         if (lc($cand->id() || '') eq $dest_id) {
             $dest = $cand;
             last;
@@ -5721,7 +5729,7 @@ sub lineoutsQuery {
         };
     }
 
-    for my $dest (_dlnaCandidates()) {
+    for my $dest (_dlnaCandidates(1)) {
         my $did = lc($dest->id() || '');
         next unless $did;
         my $on = _destPlayingRelay($dest, $wid) ? 1 : 0;
