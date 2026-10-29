@@ -6,6 +6,12 @@ Ce plugin permet donc d'enrichir la platine Wiim avec une intégration poussée,
 
 Version 1.0.49.
 
+## Dépôt pour Lyrion
+
+Dans Réglages, Greffons, dépôts supplémentaires :
+
+https://raw.githubusercontent.com/jsarcand/WiimIntegration/main/repo.xml
+
 ## Installation
 
 Copier ce dossier dans les plugins du serveur, sous le nom `WiimIntegration` :

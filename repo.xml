@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<extensions>
+  <details>
+    <title lang="EN">Wiim Integration</title>
+    <title lang="FR">Intégration WiiM</title>
+  </details>
+  <plugins>
+    <plugin name="WiimIntegration" version="1.0.49" minTarget="8.0" maxTarget="*">
+      <title lang="EN">Wiim Integration</title>
+      <title lang="FR">Intégration WiiM</title>
+      <desc lang="EN">Full WiiM control in LMS: playback, presets, and DLNA redistribution to other Lyrion players.</desc>
+      <desc lang="FR">Contrôle complet des WiiM dans LMS : lecture, préréglages et redistribution DLNA vers d'autres platines Lyrion.</desc>
+      <changes lang="EN">1.0.49: DLNA renderer name follows the Lyrion server. Grouped players are listed as destinations.</changes>
+      <changes lang="FR">1.0.49 : le nom du rendu DLNA suit le serveur Lyrion. Les platines groupées sont proposées comme destinations.</changes>
+      <category>tools</category>
+      <creator>JS Arcand assisted by Grok</creator>
+      <email>info@jsarcand.com</email>
+      <link>https://github.com/jsarcand/WiimIntegration</link>
+      <url>https://raw.githubusercontent.com/jsarcand/WiimIntegration/v1.0.49/WiimIntegration-1.0.49.zip</url>
+      <sha>2f13d11f02e7c9cfa2116b63cdc46f3933c1e36a</sha>
+    </plugin>
+  </plugins>
+</extensions>
