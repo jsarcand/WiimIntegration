@@ -1,6 +1,6 @@
 # Wiim Integration
 
-Plugin Lyrion (LMS) pour les lecteurs WiiM. Il permet de sélectionner l'est entrées et sorties, de configurer les préréglages directement de Lyrion, de surveiller la lecture du Wiim et de la contrôler, ainsi que la redistribution audio DLNA vers d’autres platines Lyrion comme récepteur DNLA-renderer.
+Plugin Lyrion (LMS) pour les lecteurs WiiM. Il permet de sélectionner les entrées et sorties, de configurer les préréglages directement de Lyrion, de surveiller la lecture du Wiim (incluant la récupération des métadatas) et de contrôler la lecture, ainsi que la redistribution audio DLNA vers d’autres platines Lyrion comme récepteur DNLA-renderer.
 
 Ce plugin permet donc d'enrichir la platine Wiim avec une intégration poussée, permettant de transformer une platine Wiim en platine qui a des capacités et une intégration au niveau des appareils Squeezebox.  
 
