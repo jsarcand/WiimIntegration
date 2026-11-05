@@ -4,7 +4,7 @@ Lyrion (LMS) plugin for WiiM players. It selects inputs and outputs, configures 
 
 The plugin gives a WiiM player a deeper place in Lyrion, closer to the capabilities and integration of a Squeezebox.
 
-Version 1.0.49.
+Version 1.0.50.
 
 [Lire en français](#français)
 
@@ -37,9 +37,13 @@ Commands:
 
 The Material now-playing bar can show this state from the `wiim_diffuse` field returned by `status`. That display belongs to the theme, not to this plugin.
 
-## Usage notes
+## Listen
 
-Pairing still has to be done in the WiiM app each time this function is used. Pairing does not survive an output change on the WiiM.
+On a Lyrion player, Listen casts the WiiM with AudioCast. The WiiM app does not ask to pair. The Lyrion preset picker lists the same players under WiiM Streams. A row stores `wiimcast://` and the player MAC. Pressing that preset casts to the player that owns the slot.
+
+Audio Pro A10 and C10 have no DLNA output, so they are not offered as sources. They can still receive a stream. Stopping the cast puts back the volume the amplifier had when the cast started.
+
+## Usage notes
 
 Spotify and TIDAL inputs configured on the WiiM are locked in the preset list, so reordering presets does not overwrite them. They can be deleted, then set up again as a Lyrion preset.
 
@@ -51,7 +55,7 @@ Plugin Lyrion (LMS) pour les lecteurs WiiM. Il permet de sélectionner les entr�
 
 Le plugin enrichit la platine WiiM d’une intégration poussée, pour lui donner des capacités et une place dans Lyrion au niveau d’un appareil Squeezebox.
 
-Version 1.0.49.
+Version 1.0.50.
 
 [Read in English](#wiim-integration)
 
@@ -84,8 +88,12 @@ Commandes :
 
 La barre de lecture Material peut afficher cet état à partir du champ `wiim_diffuse` renvoyé par `status`. Cet affichage appartient au thème, pas à ce plugin.
 
-### Notes d’usage
+### Écouter
 
-Pour l’instant, le pairage doit être fait dans l’application WiiM chaque fois qu’on veut utiliser cette fonction. Le pairage ne résiste pas à un changement de sortie sur le WiiM.
+Sur une platine Lyrion, Écouter envoie le WiiM en AudioCast. L’application WiiM ne redemande pas de pairage. Le sélecteur de préréglages Lyrion liste ces platines sous Flux WiiM. Une ligne enregistre `wiimcast://` et l’adresse MAC. L’appui sur ce préréglage diffuse vers la platine qui possède l’emplacement.
+
+Les Audio Pro A10 et C10 n’ont pas de sortie DLNA, donc ils ne sont pas proposés comme sources. Ils peuvent toujours recevoir un flux. À l’arrêt, le volume de l’amplificateur revient à celui d’avant la diffusion.
+
+### Notes d’usage
 
 Dans les préréglages, les entrées Spotify et TIDAL configurées sur le WiiM sont verrouillées dans l’interface, pour éviter qu’une réorganisation des préréglages les écrase. On peut toutefois les effacer, puis les configurer comme préréglage Lyrion.

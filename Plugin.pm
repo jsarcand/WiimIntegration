@@ -31,6 +31,7 @@ use Slim::Utils::Favorites;
 use Plugins::WiimIntegration::UPnPHelper;
 use Plugins::WiimIntegration::DlnaRenderer;
 use Plugins::WiimIntegration::RelayProto;
+use Plugins::WiimIntegration::CastProto;
 use Plugins::WiimIntegration::PresetKeys;
 use Plugins::WiimIntegration::Settings;
 
@@ -147,7 +148,7 @@ my @LINEOUT_MODES = (
 );
 
 sub getDisplayName { 'PLUGIN_WIIMINTEGRATION' }
-sub getVersion     { '1.0.49' }
+sub getVersion     { '1.0.50' }
 
 # project / priv_prj from getStatusEx. Longer names are tested first.
 # Unknown projects keep the streamer jacks and omit HDMI, which the bitmask
@@ -170,9 +171,11 @@ sub _capsForProject {
         if $project =~ /mini/;
     return _caps('WiiM Sound', [qw(bluetooth line-in wifi)], [])
         if $project =~ /sound/;
-    return _caps('Audio Pro A10', [qw(bluetooth line-in wifi)], [], 'AUX')
+    # Powered speakers. audio_cast:* is "unknown command", so they cannot
+    # send their stream to another player. They can still receive.
+    return _caps('Audio Pro A10', [qw(bluetooth line-in wifi)], [], 'AUX', 0, 0)
         if $project =~ /a10/;
-    return _caps('Audio Pro C10', [qw(bluetooth line-in wifi)], [])
+    return _caps('Audio Pro C10', [qw(bluetooth line-in wifi)], [], '', 0, 0)
         if $project =~ /c10/;
     return _caps('WiiM Pro', [qw(bluetooth line-in optical wifi)], [qw(1 2 3)])
         if $project =~ /(?:^|_)pro(?:_|$)/;
@@ -181,13 +184,15 @@ sub _capsForProject {
 }
 
 sub _caps {
-    my ($label, $inputs, $outputs, $line_label, $unknown) = @_;
+    my ($label, $inputs, $outputs, $line_label, $unknown, $audiocast) = @_;
+    $audiocast = 1 if !defined $audiocast;
     return {
         label      => $label,
         inputs     => $inputs,
         outputs    => $outputs || [],
         line_label => $line_label || '',
         unknown    => $unknown ? 1 : 0,
+        audiocast  => $audiocast ? 1 : 0,
     };
 }
 
@@ -227,14 +232,25 @@ sub _refreshModel {
         my $outputs = @{$caps->{outputs}} ? join(',', @{$caps->{outputs}}) : 'none';
         my $msg = 'WiiM model ' . ($client->name() || $id)
             . ": $project → $caps->{label} inputs="
-            . join(',', @{$caps->{inputs}}) . " outputs=$outputs";
+            . join(',', @{$caps->{inputs}}) . " outputs=$outputs"
+            . ' audiocast=' . ($caps->{audiocast} ? 'yes' : 'no');
         if ($caps->{unknown}) {
             $log->warn("$msg (HDMI hidden until this project is catalogued)");
         }
         else {
             $log->info($msg);
         }
+        # The preset list was published before this model was known.
+        _publishPresetSources();
     });
+}
+
+# AudioCast output (Écouter, Flux WiiM, Cast to). A10 and C10 do not
+# implement it. An unknown project stays listed until getStatusEx returns.
+sub _canAudioCast {
+    my $client = shift || return 0;
+    return 0 unless isWiimPlayer($client);
+    return _clientCaps($client)->{audiocast} ? 1 : 0;
 }
 
 sub _sourceModes {
@@ -915,7 +931,50 @@ sub _registerWiimPlayer {
         $playerState{$cid}{preset_fetch_at} = time();
     });
     _ensurePresetKeys($client, 1);
+    _publishPresetSources();
     $log->info("Wiim player registered: " . $client->name() . " (" . ($ip || '?') . " -> $mac)");
+}
+
+# Alarm->getPlaylists is the list Material's preset picker already shows.
+# Registering here adds one category. The skin does not need a WiiM case.
+my $presetSourceSig = '';
+
+sub _publishPresetSources {
+    return if main::SCANNER;
+    my @items;
+    for my $client (Slim::Player::Client::clients()) {
+        next unless _canAudioCast($client);
+        next if eval { $client->disconnected() };
+        my $mac = lc($client->id() || '');
+        next unless $mac;
+        push @items, {
+            title => $client->name() || $mac,
+            url   => 'wiimcast://' . $mac,
+        };
+    }
+    @items = sort { lc($a->{title}) cmp lc($b->{title}) } @items;
+    my $sig = join "\n", map { $_->{url} . ' ' . $_->{title} } @items;
+    return if $sig eq $presetSourceSig;
+    eval {
+        require Slim::Utils::Alarm;
+        Slim::Utils::Alarm->addPlaylists('WIIM_STREAMS', \@items);
+        1;
+    } or do {
+        $log->warn('Preset menu: ' . ($@ || 'unknown'));
+        return;
+    };
+    $presetSourceSig = $sig;
+    $log->info('Preset menu: ' . scalar(@items) . ' WiiM');
+}
+
+# Preset on a Lyrion player: that player is the destination.
+sub playWiimCast {
+    my ($dest, $mac) = @_;
+    my $wiim = _wiimClientById($mac);
+    return unless $dest && $wiim && _canAudioCast($wiim) && !isWiimPlayer($dest);
+    return if lc($dest->id() || '') eq lc($wiim->id() || '');
+    $log->info('Preset cast ' . ($wiim->name() || $mac) . ' to ' . ($dest->name() || $dest->id()));
+    _castStart($wiim, $dest);
 }
 
 # (Re)start the WiiM poll loop. Safe to call repeatedly (kills prior timer).
@@ -963,7 +1022,7 @@ sub initPlugin {
     return unless $prefs->get('enabled');
 
 
-    Slim::Control::Request::subscribe(\&clientEvent, [['client'], ['new', 'reconnect']]);
+    Slim::Control::Request::subscribe(\&clientEvent, [['client'], ['new', 'reconnect', 'disconnect', 'forget']]);
     Slim::Control::Request::subscribe(\&handlePlaylistEvent, [['playlist'], []]);
     Slim::Control::Request::subscribe(\&powerEvent, [['power']]);
 
@@ -996,6 +1055,9 @@ sub initPlugin {
     );
     Slim::Control::Request::addDispatch(
         ['wiimintegration', 'diffuse', '_dest'], [1, 0, 1, \&diffuseCommand]
+    );
+    Slim::Control::Request::addDispatch(
+        ['wiimintegration', 'cast', '_dest'], [1, 0, 1, \&castCommand]
     );
     Slim::Control::Request::addDispatch(
         ['wiimintegration', 'diffusereset'], [1, 0, 0, \&diffuseResetCommand]
@@ -1033,6 +1095,9 @@ sub initPlugin {
     Slim::Player::ProtocolHandlers->registerHandler(
         'wiimrelay' => 'Plugins::WiimIntegration::RelayProto',
     );
+    Slim::Player::ProtocolHandlers->registerHandler(
+        'wiimcast' => 'Plugins::WiimIntegration::CastProto',
+    );
     Slim::Player::ProtocolHandlers->registerURLHandler(
         '/plugins/WiimIntegration/relay\.mp3(?:\?|$)' => 'Plugins::WiimIntegration::RelayProto',
     );
@@ -1049,11 +1114,12 @@ sub initPlugin {
         refresh_on        => \&_dlnaRefreshOn,
         base_url          => \&_lmsListenBaseUrl,
     });
-    $log->warn("Wiim Integration v1.0.49 loaded");
+    $log->warn("Wiim Integration v1.0.50 loaded");
 
     foreach my $client (Slim::Player::Client::clients()) {
         _registerWiimPlayer($client);
     }
+    _publishPresetSources();
 }
 
 sub postinitPlugin {
@@ -1749,6 +1815,13 @@ sub _handleWiimTransferQueue {
 
 sub clientEvent {
     my $request = shift;
+    my $which = eval { $request->getRequest(1) } || '';
+    # A player that left must drop out of the preset list. Re-registering it
+    # would poll a socket that is already gone.
+    if ($which eq 'disconnect' || $which eq 'forget') {
+        _publishPresetSources();
+        return;
+    }
     _registerWiimPlayer($request->client());
 }
 
@@ -1842,6 +1915,10 @@ sub _allWiimClients {
         push @clients, $client if isWiimPlayer($client);
     }
     return sort { lc($a->name() || '') cmp lc($b->name() || '') } @clients;
+}
+
+sub _audioCastSources {
+    return grep { _canAudioCast($_) } _allWiimClients();
 }
 
 sub _wiimClientById {
@@ -2062,24 +2139,16 @@ sub _webExtrasPage {
     }
     elsif ($context) {
         my $q = _webPlayerQuery($context);
-        my @wiim_clients = _allWiimClients();
+        my @wiim_clients = _audioCastSources();
 
         if (@wiim_clients) {
             push @items, { name => _menuText($context, 'WIIM_STREAMS', 'WiiM Streams') };
             foreach my $wiim (@wiim_clients) {
                 my $name = $wiim->name() || $wiim->id();
-                my $direct = _directStreamUrl($wiim);
-                if ($direct) {
-                    push @items, {
-                        name => "$name - " . _menuText($context, 'STREAM_LISTEN', 'Listen'),
-                        url  => _webLink('action.html', $q, action => 'listen', value => $wiim->id()),
-                    };
-                }
-                else {
-                    push @items, {
-                        name => "$name - " . _menuText($context, 'STREAM_NO_HTTP', 'No HTTP stream to play here'),
-                    };
-                }
+                push @items, {
+                    name => "$name - " . _menuText($context, 'STREAM_LISTEN', 'Listen'),
+                    url  => _webLink('action.html', $q, action => 'listen', value => $wiim->id()),
+                };
             }
         }
         else {
@@ -2259,9 +2328,9 @@ sub _webActionPage {
 
     if ($action eq 'listen') {
         my $wiim = _wiimClientById($value);
-        if ($context && $wiim && _playDirectOn($context, $wiim)) {
-            my $st = Plugins::WiimIntegration::DlnaRenderer::status();
-            push @items, { name => ($wiim->name() || '') . ' — ' . (($st && $st->{title}) || _directStreamUrl($wiim)) };
+        if ($context && $wiim && _canAudioCast($wiim) && !isWiimPlayer($context)) {
+            _castStart($wiim, $context);
+            push @items, { name => ($wiim->name() || '') . ' — ' . _menuText($context, 'STREAM_LISTEN', 'Listen') };
         }
         else {
             push @items, { name => _menuText($context, 'STREAM_NO_HTTP', 'No HTTP stream to play here') };
@@ -2353,6 +2422,9 @@ sub _noteDeviceVolume {
     my $vol = _clampVolume($reported);
     my $id = $client->id();
     $playerState{$id}{device_volume} = $vol;
+    # AudioCast reports the renderer's stored volume. Adopting it makes the
+    # stop put that older level back on the amp.
+    return if $playerState{$id}{volume_cast_freeze};
     return unless $external;
 
     my $hold   = $playerState{$id}{volume_hold_until} || 0;
@@ -2377,6 +2449,23 @@ sub _setWiimVolume {
     $playerState{$id}{volume_hold_until} = time() + 2.5;
     _setVolumePref($client, $vol);
     apiCall($client, "setPlayerCmd:vol:$vol");
+}
+
+# Last level the amp was at. The client pref is only a fallback: it can still
+# hold an older value the WiiM remote has already left.
+sub _listeningVolume {
+    my $client = shift || return;
+    my $id = $client->id() || return;
+    my $vol = $playerState{$id}{device_volume};
+    if (!defined $vol || $vol eq '') {
+        $vol = $playerState{$id}{volume};
+    }
+    if (!defined $vol || $vol eq '') {
+        my $pref = preferences('server')->client($client)->get('volume');
+        $vol = $pref if defined $pref && $pref ne '';
+    }
+    return if !defined $vol || $vol eq '';
+    return _clampVolume($vol);
 }
 
 sub wiimMixerVolume {
@@ -3365,6 +3454,7 @@ sub _writePresetBridgesNow {
 #   /control/play  /control/pause  /control/stop  /control/next  /control/prev
 #   /control/shuffle  /control/shuffle_on  /control/shuffle_off
 #   /control/source/bluetooth  /control/source/line-in  …
+#   /control/cast?dest=<player mac>   (AudioCast to Lyrion, then diffuse)
 # Legacy (still accepted):
 #   /preset=1.m3u
 sub _dlnaSourceHash {
@@ -3624,6 +3714,7 @@ sub _serveRelay {
     my $st = {
         http     => $httpClient,
         response => $response,
+        wiim     => lc($wiim->id() || ''),
         phase    => 'connect',
         raw      => '',
         headers  => 1,
@@ -3819,6 +3910,22 @@ sub _relayAbort {
     $log->info('DLNA relay closed: ' . ($msg || ''));
 }
 
+sub _closeRelaysFor {
+    my $wid = lc(shift || '');
+    return unless $wid;
+    for my $up (keys %relay) {
+        my $st = $relay{$up} || next;
+        next unless lc($st->{wiim} || '') eq $wid;
+        $log->info('DLNA relay closed: diffusion stopped');
+        if ($st->{headers}) {
+            _relayAbort($up, 200, 'diffusion stopped');
+        }
+        else {
+            _relayClose($up);
+        }
+    }
+}
+
 sub _relayClose {
     my $up = shift || return;
     my $st = delete $relay{$up} || return;
@@ -3857,6 +3964,10 @@ sub _registerHttpEndpoints {
     Slim::Web::Pages->addRawFunction(
         qr{^/(?:control|playback)/source/(bluetooth|line-in|optical|hdmi|tv|wifi)(?:\.m3u)?$}i,
         \&serveControl
+    );
+    Slim::Web::Pages->addRawFunction(
+        qr{^/(?:control|playback)/cast(?:/[0-9a-f:]+)?(?:\.m3u)?$}i,
+        \&serveCast
     );
 }
 
@@ -3984,6 +4095,53 @@ sub _presetSlotPlayModes {
     $shuffle = 0 if $shuffle !~ /^[012]$/;
     $repeat  = 0 if $repeat  !~ /^[012]$/;
     return ($shuffle, $repeat);
+}
+
+sub serveCast {
+    my ($httpClient, $response) = @_;
+    my $uri = eval { $response->request->uri } || return;
+    my $path = $uri->path || '';
+    my $qs = eval { $uri->query } || '';
+    my $dest_id = '';
+    if ($path =~ m{^/(?:control|playback)/cast/([0-9a-f:]{17})}i) {
+        $dest_id = $1;
+    }
+    elsif ($qs =~ /(?:^|&)dest=([^&]+)/i) {
+        $dest_id = eval { Slim::Utils::Misc::unescape($1, 1) } || $1;
+    }
+    my ($client, $remote_ip) = _clientFromHttpRequest($httpClient);
+    if ($qs =~ /(?:^|&)player=([^&]+)/i) {
+        my $pid = eval { Slim::Utils::Misc::unescape($1, 1) } || $1;
+        $pid =~ s/%3A/:/gi;
+        my $by_id = Slim::Player::Client->getClient($pid)
+            || Slim::Player::Client->getClient(lc $pid);
+        $client = $by_id if $by_id;
+    }
+    $remote_ip ||= 'unknown';
+    my $fail = sub {
+        my $msg = shift;
+        _sendJson($httpClient, $response, { id => 0, error => $msg, result => { ok => 0 } });
+    };
+    return $fail->("No mapping for this WiiM ($remote_ip)") unless $client && isWiimPlayer($client);
+    return $fail->('No DLNA output on this player') unless _canAudioCast($client);
+    my $dest = _destById($dest_id);
+    return $fail->('Unknown Lyrion player') unless $dest;
+    my $id = $client->id() || '';
+    my $busy = $id ne '' ? ($playerState{$id}{cast_busy} || 0) : 0;
+    if ($busy && time() - $busy < 20) {
+        _sendJson($httpClient, $response, { id => 0, result => { ok => 1, debounced => 1 } });
+        return;
+    }
+    $log->info('Cast ' . ($client->name() || $remote_ip) . ' -> ' . ($dest->name() || $dest->id()));
+    _castStart($client, $dest);
+    _sendJson($httpClient, $response, {
+        id     => 0,
+        result => {
+            ok     => 1,
+            cast   => lc($dest->id() || ''),
+            player => $client->id() || '',
+        },
+    });
 }
 
 sub serveControl {
@@ -5203,8 +5361,13 @@ sub _injectExternalStatus {
 
 # Negative id: LMS uses that for remote tracks, and the Radio treats it as a feed.
 sub _wiimTrackId {
-    my $key = shift || 'wiim';
-    my $n = hex(substr(md5_hex($key), 0, 7));
+    my $key = shift;
+    $key = 'wiim' if !defined $key || $key eq '';
+    # md5_hex accepts é (U+00E9) but croaks on a codepoint above 255:
+    # apostrophe typographique, œ, ✓. That abort fails the status query.
+    utf8::encode($key) if utf8::is_utf8($key);
+    my $digest = eval { md5_hex($key) } || '';
+    my $n = $digest ne '' ? hex(substr($digest, 0, 7)) : 0;
     $n ||= 1;
     return -1 * $n;
 }
@@ -5262,25 +5425,19 @@ sub menuQuery {
     my $client = $request->client();
 
     unless ($client && isWiimPlayer($client)) {
-        my @wiim_clients = _allWiimClients();
+        my @wiim_clients = _audioCastSources();
         if (@wiim_clients) {
             _addMenuItems($request, map {
                 my $name = $_->name() || $_->id();
-                my $direct = _directStreamUrl($_);
                 my $id = $_->id();
-                $direct ? {
+                {
                     id      => 'wiim_stream_' . $id,
                     text    => $name . "\n" . _menuText($client, 'STREAM_LISTEN', 'Listen'),
-                    type    => 'audio',
-                    url     => $direct,
                     icon_id => 'MTL_svg_stream',
                     actions => {
                         go   => { cmd => ['wiimintegration', 'listen', $id], player => 0 },
                         play => { cmd => ['wiimintegration', 'listen', $id], player => 0 },
                     },
-                } : {
-                    id   => 'wiim_stream_' . $id,
-                    text => $name . "\n" . _menuText($client, 'STREAM_NO_HTTP', 'No HTTP stream to play here'),
                 };
             } @wiim_clients);
         }
@@ -5319,14 +5476,24 @@ sub menuQuery {
 
 sub listenCommand {
     my ($request) = @_;
-    my $client = $request->client();
+    my $dest = $request->client();
     my $wiim_id = $request->getParam('_wiimid') || $request->getRequest(2) || '';
     my $wiim = _wiimClientById($wiim_id);
-    unless ($client && $wiim && _playDirectOn($client, $wiim)) {
-        $request->setStatusBadParams();
-        return;
+    # Extra is opened on the Lyrion player. cast addresses the WiiM and
+    # takes that player as the destination.
+    unless ($dest && $wiim && _canAudioCast($wiim) && !isWiimPlayer($dest)) {
+        return $request->setStatusBadParams();
     }
-    $request->setStatusDone();
+    $request->setStatusProcessing();
+    _castStart($wiim, $dest, sub {
+        my $ok = shift;
+        if ($ok) {
+            $request->setStatusDone();
+        }
+        else {
+            $request->setStatusBadParams();
+        }
+    });
 }
 
 sub sourcesQuery {
@@ -5472,14 +5639,23 @@ sub _diffuseRememberSource {
     my $mode = $playerState{$id}{mode};
     $mode = '' unless defined $mode;
     my $cmd = _sourceCmdFromMode($mode);
+    delete $playerState{$id}{diffuse_hide};
+    my $lineout = $playerState{$id}{lineout_mode};
+    $lineout = '' unless defined $lineout;
+    $lineout =~ s/\D//g;
+    my $vol = _listeningVolume($wiim);
     $playerState{$id}{diffuse} = {
         source_cmd => $cmd,
         mode       => $mode,
         mode_name  => $playerState{$id}{mode_name} || '',
+        lineout    => $lineout,
+        volume     => $vol,
         at         => time(),
     };
     $log->info('Diffusion snapshot ' . ($wiim->name() || $id)
-        . " mode=$mode cmd=" . ($cmd ne '' ? $cmd : '-'));
+        . " mode=$mode cmd=" . ($cmd ne '' ? $cmd : '-')
+        . ' lineout=' . ($lineout ne '' ? $lineout : '-')
+        . ' volume=' . (defined $vol ? $vol : '-'));
 }
 
 sub _relayWiimIdFromUrl {
@@ -5556,6 +5732,17 @@ sub _diffuseSourceChanged {
 }
 
 # List context: destinations that are playing, paused on, or (if asked) queuing this relay.
+sub _otherRelayDests {
+    my ($wiim, $except) = @_;
+    my $skip = lc($except && $except->id() || '');
+    for my $row (_diffuseActiveDests($wiim, 1)) {
+        my $id = lc($row->{client}->id() || '');
+        next if $skip ne '' && $id eq $skip;
+        return 1;
+    }
+    return 0;
+}
+
 sub _diffuseActiveDests {
     my ($wiim, $scan_queue) = @_;
     my $wid = lc($wiim && $wiim->id() || '');
@@ -5579,33 +5766,144 @@ sub _diffuseForgetIfIdle {
     delete $playerState{$id}{diffuse};
 }
 
+# Opening :8086/stream.mp3 moves the WiiM off its analog jack. Putting the same
+# hardware mode back is what the line-out menu does, and that is what returns
+# the music. Spotify and the other app streams have no switchmode to restore.
+sub _diffuseRestoreOutput {
+    my ($wiim, $snap) = @_;
+    return unless $wiim && isWiimPlayer($wiim);
+    my $id = $wiim->id() || return;
+    my $lineout = (ref $snap eq 'HASH') ? ($snap->{lineout} || '') : '';
+    if ($lineout eq '') {
+        $lineout = $playerState{$id}{lineout_mode} || '';
+        $lineout =~ s/\D//g;
+    }
+    if ($lineout ne '' && _validLineout($wiim, $lineout)) {
+        $log->info('Diffusion reset restores ' . ($wiim->name() || $id)
+            . ' line out ' . _lineoutLabel($lineout) . " ($lineout)");
+        setLineout($wiim, $lineout);
+        return;
+    }
+    $log->info('Diffusion reset has no line out to restore on ' . ($wiim->name() || $id));
+}
+
+# speaker_disable writes the renderer's stored volume onto the amp. Put the
+# pre-cast level back, then once more after that write has landed. A slider
+# move during the cast wins over the snapshot.
+sub _diffuseRestoreVolume {
+    my ($wiim, $snap) = @_;
+    return unless $wiim && isWiimPlayer($wiim);
+    my $id = $wiim->id() || return;
+    return unless delete $playerState{$id}{volume_cast_freeze};
+    my $at_freeze = delete $playerState{$id}{volume_cast_target};
+
+    my $snap_vol = (ref $snap eq 'HASH') ? $snap->{volume} : undef;
+    my $target = $playerState{$id}{volume_target};
+    # volume_target can still be an older slider value. Only a move that
+    # happened during the cast replaces the snapshot.
+    my $moved = 0;
+    if (defined $target && $target ne '') {
+        if (!defined $at_freeze || $at_freeze eq '') {
+            $moved = 1;
+        }
+        elsif (_clampVolume($target) != _clampVolume($at_freeze)) {
+            $moved = 1;
+        }
+    }
+    my $vol;
+    if ($moved) {
+        $vol = _clampVolume($target);
+    }
+    elsif (defined $snap_vol && $snap_vol ne '') {
+        $vol = _clampVolume($snap_vol);
+    }
+    if (!defined $vol) {
+        $log->info('Diffusion reset has no volume to restore on ' . ($wiim->name() || $id));
+        return;
+    }
+    $log->info('Diffusion reset restores ' . ($wiim->name() || $id) . " volume $vol");
+    _setWiimVolume($wiim, $vol);
+    $playerState{$id}{volume_restore_token} = ($playerState{$id}{volume_restore_token} || 0) + 1;
+    my $token = $playerState{$id}{volume_restore_token};
+    _scheduleVolumeRestore($wiim, $vol, $token, 0.9);
+    _scheduleVolumeRestore($wiim, $vol, $token, 2.0);
+}
+
+sub _scheduleVolumeRestore {
+    my ($wiim, $vol, $token, $delay) = @_;
+    Slim::Utils::Timers::setTimer($wiim, time() + $delay, sub {
+        my $c = shift || return;
+        my $cid = $c->id() || return;
+        return if ($playerState{$cid}{volume_restore_token} || 0) != $token;
+        return if $playerState{$cid}{volume_cast_freeze};
+        my $now = $playerState{$cid}{volume_target};
+        return if defined $now && $now ne '' && _clampVolume($now) != $vol;
+        _setWiimVolume($c, $vol);
+    }, $wiim);
+}
+
+sub _diffuseSuppressed {
+    my $id = lc(shift || '');
+    return 0 unless $id;
+    my $until = $playerState{$id}{diffuse_hide} || 0;
+    return $until > time() ? 1 : 0;
+}
+
+# Drop the relay the destination is actually playing, not only the queue row.
+# playlist delete alone leaves playingSong on wiimrelay:// and the button stays.
+sub _stopRelayPlayback {
+    my ($dest, $wiim_id) = @_;
+    return 0 unless $dest && $wiim_id;
+    my $held = _destHoldingRelay($dest, $wiim_id) ? 1 : 0;
+    my $queued = _playlistHasRelay($dest, $wiim_id) ? 1 : 0;
+    return 0 unless $held || $queued;
+    if ($held) {
+        eval { Slim::Control::Request::executeRequest($dest, ['stop']); };
+    }
+    _removeRelayTracks($dest, $wiim_id);
+    return 1;
+}
+
 sub _diffuseReset {
     my $wiim = shift || return;
     return unless isWiimPlayer($wiim);
     my $id = $wiim->id() || return;
     my $wid = lc $id;
+    _castCancel($id);
     for my $dest (_dlnaCandidates(1)) {
         my $did = lc($dest->id() || '');
         next unless $did;
         my $has = _playlistHasRelay($dest, $wid) || _destHoldingRelay($dest, $wid);
-        _removeRelayTracks($dest, $wid) if $has;
+        _stopRelayPlayback($dest, $wid) if $has;
         # The target list is the diffusion itself. Clear it even if play has not started.
         _dlnaSetTarget($did, 0) if $has || _dlnaTargetOn($did);
     }
+    # After stop, so a player that retries the old URL finds the socket already gone.
+    _closeRelaysFor($wid);
     my $snap = delete $playerState{$id}{diffuse};
-    my $saved = (ref $snap eq 'HASH' && $snap->{source_cmd}) ? $snap->{source_cmd} : '';
-    my $now = _sourceCmdFromMode($playerState{$id}{mode});
-    if ($saved ne '' && $saved ne $now && _validSource($wiim, $saved)) {
-        $log->info('Diffusion reset restores ' . ($wiim->name() || $id) . " to $saved");
-        switchSource($wiim, $saved);
-    }
-    elsif ($saved ne '' && $saved ne $now) {
-        $log->info('Diffusion reset left ' . ($wiim->name() || $id)
-            . " on current source (cannot restore $saved)");
-    }
-    else {
-        $log->info('Diffusion reset on ' . ($wiim->name() || $id));
-    }
+    # Hide the button at once. A destination can still report the old URL
+    # for a moment after stop; the next real cast clears this.
+    $playerState{$id}{diffuse_hide} = time() + 8;
+    # speaker_disable first when this plugin opened the cast. Line-out is
+    # restored in the callback so it is not overwritten by the WiiM reverting.
+    _castRelease($wiim, sub {
+        my $disabled = shift;
+        _diffuseRestoreOutput($wiim, $snap);
+        _diffuseRestoreVolume($wiim, $snap) if $disabled;
+        my $saved = (ref $snap eq 'HASH' && $snap->{source_cmd}) ? $snap->{source_cmd} : '';
+        my $now = _sourceCmdFromMode($playerState{$id}{mode});
+        if ($saved ne '' && $saved ne $now && _validSource($wiim, $saved)) {
+            $log->info('Diffusion reset restores ' . ($wiim->name() || $id) . " to $saved");
+            switchSource($wiim, $saved);
+        }
+        elsif ($saved ne '' && $saved ne $now) {
+            $log->info('Diffusion reset left ' . ($wiim->name() || $id)
+                . " on current source (cannot restore $saved)");
+        }
+        else {
+            $log->info('Diffusion reset on ' . ($wiim->name() || $id));
+        }
+    });
 }
 
 sub _wiimForRelayClient {
@@ -5621,25 +5919,286 @@ sub _wiimForRelayClient {
     return;
 }
 
+sub _destById {
+    my $dest_id = lc(shift || '');
+    $dest_id =~ s/\s+//g;
+    $dest_id =~ s/%3a/:/gi;
+    return unless $dest_id =~ /^[0-9a-f]{2}(?::[0-9a-f]{2}){5}$/;
+    for my $cand (_dlnaCandidates(1)) {
+        return $cand if lc($cand->id() || '') eq $dest_id;
+    }
+    return;
+}
+
+# The WiiM caches the renderer under the name it first discovered.
+# Match the live friendly name, then that stale "Lyrion Diffusion" entry.
+sub _audioCastPick {
+    my $data = shift;
+    return ('', '') unless ref $data eq 'HASH' && ref $data->{outputs} eq 'ARRAY';
+    my $friendly = '';
+    eval { $friendly = Plugins::WiimIntegration::DlnaRenderer::_friendly_name() || ''; };
+    my $i = 0;
+    my @ranked;
+    for my $row (@{ $data->{outputs} }) {
+        $i++;
+        next unless ref $row eq 'HASH';
+        my $type = lc($row->{type} || '');
+        next if $type ne '' && $type ne 'upnp';
+        my $name = $row->{name} || '';
+        $name =~ s/^\s+|\s+$//g;
+        my $sid = $row->{id};
+        $sid = '' unless defined $sid;
+        $sid =~ s/\s+//g;
+        next unless $sid =~ /^\d+$/;
+        my $rank = 0;
+        if ($friendly ne '' && lc($name) eq lc($friendly)) {
+            $rank = 3;
+        }
+        elsif ($name =~ /Lyrion Music Server\z/i) {
+            $rank = 2;
+        }
+        elsif (lc($name) eq 'lyrion diffusion') {
+            $rank = 1;
+        }
+        next unless $rank;
+        my $selected = $row->{selected} ? 1 : 0;
+        push @ranked, [ $rank, $selected, -$i, $sid, $name ];
+    }
+    return ('', '') unless @ranked;
+    @ranked = sort { $b->[0] <=> $a->[0] || $b->[1] <=> $a->[1] || $b->[2] <=> $a->[2] } @ranked;
+    return ($ranked[0][3], $ranked[0][4]);
+}
+
+sub _castCancel {
+    my $id = shift || return;
+    $playerState{$id}{cast_epoch} = ($playerState{$id}{cast_epoch} || 0) + 1;
+    delete $playerState{$id}{cast_busy};
+}
+
+sub _castStale {
+    my ($id, $epoch) = @_;
+    return 0 unless $id && defined $epoch;
+    return ($playerState{$id}{cast_epoch} || 0) == $epoch ? 0 : 1;
+}
+
+sub _castRelease {
+    my ($wiim, $then) = @_;
+    my $id = ($wiim && $wiim->id()) || '';
+    my $sid = '';
+    if ($id ne '') {
+        $sid = delete $playerState{$id}{audiocast_speaker};
+        $sid = '' unless defined $sid;
+        $sid =~ s/\D//g;
+    }
+    unless ($wiim && $sid ne '') {
+        $then->(0) if $then;
+        return;
+    }
+    # Set before the request. apiCall runs the callback immediately when the
+    # host is unknown, and a second release can run before we return.
+    $playerState{$id}{volume_cast_release} = 1;
+    $log->info('AudioCast disable ' . $sid . ' on ' . ($wiim->name() || $id));
+    apiCall($wiim, "audio_cast:speaker_disable:$sid", sub {
+        my $data = shift;
+        delete $playerState{$id}{volume_cast_release};
+        if (ref $data eq 'HASH' && defined $data->{code} && 0 + $data->{code} == 0) {
+            $log->info('AudioCast disabled ' . $sid . ' on ' . ($wiim->name() || $id));
+        }
+        else {
+            $log->warn('AudioCast disable did not confirm ' . $sid . ' on ' . ($wiim->name() || $id));
+        }
+        $then->(1) if $then;
+    });
+}
+
+sub _diffuseTurnOff {
+    my ($wiim, $dest) = @_;
+    return unless $wiim && $dest;
+    _castCancel($wiim->id());
+    my $wid = lc($wiim->id() || '');
+    my $others = _otherRelayDests($wiim, $dest);
+    _stopRelayPlayback($dest, $wid);
+    _dlnaSetTarget(lc($dest->id() || ''), 0);
+    _closeRelaysFor($wid) unless $others;
+    return if $others;
+    my $id = $wiim->id();
+    my $snap = $playerState{$id}{diffuse};
+    $playerState{$id}{diffuse_hide} = time() + 8;
+    _castRelease($wiim, sub {
+        my $disabled = shift;
+        _diffuseRestoreOutput($wiim, $snap);
+        _diffuseRestoreVolume($wiim, $snap) if $disabled;
+        delete $playerState{$id}{diffuse};
+    });
+}
+
+sub _castEnable {
+    my ($wiim, $scanned, $cb, $epoch) = @_;
+    my $id = $wiim->id() || '';
+    if (_castStale($id, $epoch)) {
+        $cb->(0, 'cancelled');
+        return;
+    }
+    apiCall($wiim, 'audio_cast:get_speaker_list', sub {
+        if (_castStale($id, $epoch)) {
+            $cb->(0, 'cancelled');
+            return;
+        }
+        my ($sid, $name) = _audioCastPick(shift);
+        if ($sid ne '') {
+            $log->info('AudioCast enable ' . $sid . ' (' . $name . ') on ' . ($wiim->name() || ''));
+            apiCall($wiim, "audio_cast:speaker_enable:$sid", sub {
+                my $res = shift;
+                if (_castStale($id, $epoch)) {
+                    if (ref $res eq 'HASH' && defined $res->{code} && 0 + $res->{code} == 0) {
+                        $playerState{$id}{audiocast_speaker} = $sid;
+                    }
+                    $cb->(0, 'cancelled');
+                    return;
+                }
+                if (ref $res eq 'HASH' && defined $res->{code} && 0 + $res->{code} == 0) {
+                    $playerState{$id}{audiocast_speaker} = $sid;
+                    $cb->(1, '');
+                }
+                else {
+                    $cb->(0, 'speaker_enable');
+                }
+            });
+            return;
+        }
+        if ($scanned) {
+            $cb->(0, 'renderer not in speaker list');
+            return;
+        }
+        $log->info('AudioCast scan on ' . ($wiim->name() || ''));
+        apiCall($wiim, 'audio_cast:scan_speaker', sub {
+            Slim::Utils::Timers::setTimer(undef, time() + 3, sub {
+                _castEnable($wiim, 1, $cb, $epoch);
+            });
+        });
+    });
+}
+
+sub _castWaitReady {
+    my ($wiim, $left, $cb) = @_;
+    apiCall($wiim, 'getNewAudioOutputHardwareMode', sub {
+        my $data = shift;
+        my $on = ref $data eq 'HASH' && defined $data->{audiocast} && "$data->{audiocast}" eq '1';
+        if ($on || $left <= 0) {
+            $log->info('AudioCast ' . ($on ? 'ready' : 'not confirmed')
+                . ' on ' . ($wiim->name() || ''));
+            $cb->();
+            return;
+        }
+        Slim::Utils::Timers::setTimer(undef, time() + 0.4, sub {
+            _castWaitReady($wiim, $left - 1, $cb);
+        });
+    });
+}
+
+# speaker_enable, then the same relay play as diffuse. A second call for a
+# destination that already holds the relay turns that destination off.
+sub _castStart {
+    my ($wiim, $dest, $done) = @_;
+    unless ($wiim && $dest && _canAudioCast($wiim)) {
+        $log->info('AudioCast is not available on ' . ($wiim->name() || $wiim->id()))
+            if $wiim && isWiimPlayer($wiim);
+        $done->(0) if $done;
+        return;
+    }
+    my $wid = lc($wiim->id() || '');
+    if (_destPlayingRelay($dest, $wid) || _playlistHasRelay($dest, $wid)) {
+        _diffuseTurnOff($wiim, $dest);
+        $done->(1) if $done;
+        return;
+    }
+    my $id = $wiim->id() || '';
+    unless ($id) {
+        $done->(0) if $done;
+        return;
+    }
+    my $busy = $playerState{$id}{cast_busy} || 0;
+    if ($busy && time() - $busy < 20) {
+        $done->(1) if $done;
+        return;
+    }
+    $playerState{$id}{cast_busy} = time();
+    my $epoch = $playerState{$id}{cast_epoch} || 0;
+    my $had = ref $playerState{$id}{diffuse} eq 'HASH' ? 1 : 0;
+    # Snapshot line-out and the amp volume before speaker_enable. A hash left
+    # by a pull has no volume yet; fill it once, then leave it alone.
+    _diffuseRememberSource($wiim);
+    my $snap = $playerState{$id}{diffuse};
+    if (ref $snap eq 'HASH' && !defined $snap->{volume}) {
+        $snap->{volume} = _listeningVolume($wiim);
+    }
+    # A restore still queued from the previous stop must not land mid-cast.
+    $playerState{$id}{volume_restore_token} = ($playerState{$id}{volume_restore_token} || 0) + 1;
+    $playerState{$id}{volume_cast_target} = $playerState{$id}{volume_target};
+    $playerState{$id}{volume_cast_freeze} = 1;
+    _castEnable($wiim, 0, sub {
+        my ($ok, $why) = @_;
+        if (($why || '') eq 'cancelled' || _castStale($id, $epoch)) {
+            delete $playerState{$id}{cast_busy};
+            _castAbortVolume($id, $wiim, $snap);
+            $done->(1) if $done;
+            return;
+        }
+        unless ($ok) {
+            delete $playerState{$id}{cast_busy};
+            delete $playerState{$id}{diffuse} unless $had;
+            # Output never switched. Do not send a volume command.
+            unless ($playerState{$id}{audiocast_speaker} || $playerState{$id}{volume_cast_release}) {
+                delete $playerState{$id}{volume_cast_freeze};
+                delete $playerState{$id}{volume_cast_target};
+            }
+            $log->warn('AudioCast enable failed on ' . ($wiim->name() || $id)
+                . ($why ? ": $why" : ''));
+            $done->(0) if $done;
+            return;
+        }
+        _castWaitReady($wiim, 8, sub {
+            delete $playerState{$id}{cast_busy};
+            if (_castStale($id, $epoch)) {
+                _castAbortVolume($id, $wiim, $snap);
+                $done->(1) if $done;
+                return;
+            }
+            my $played = _playDirectOn($dest, $wiim) ? 1 : 0;
+            # Relay failed after the output switched. Keep the freeze so the
+            # stop still restores the amp instead of adopting the renderer level.
+            $log->warn('AudioCast relay did not start on ' . ($wiim->name() || $id)) unless $played;
+            $done->($played) if $done;
+        });
+    }, $epoch);
+}
+
+# Stop won the race. Disable if this attempt still holds the speaker; a
+# disable already in flight restores the volume itself.
+sub _castAbortVolume {
+    my ($id, $wiim, $snap) = @_;
+    if ($playerState{$id}{audiocast_speaker}) {
+        _castRelease($wiim, sub {
+            my $disabled = shift;
+            _diffuseRestoreOutput($wiim, $snap);
+            _diffuseRestoreVolume($wiim, $snap) if $disabled;
+        });
+        return;
+    }
+    return if $playerState{$id}{volume_cast_release};
+    delete $playerState{$id}{volume_cast_freeze};
+    delete $playerState{$id}{volume_cast_target};
+}
+
 sub diffuseCommand {
     my ($request) = @_;
     my $wiim = $request->client();
     return $request->setStatusBadParams() unless $wiim && isWiimPlayer($wiim);
-    my $dest_id = lc($request->getParam('_dest') || $request->getRequest(2) || '');
-    $dest_id =~ s/\s+//g;
-    my $dest;
-    for my $cand (_dlnaCandidates(1)) {
-        if (lc($cand->id() || '') eq $dest_id) {
-            $dest = $cand;
-            last;
-        }
-    }
+    my $dest = _destById($request->getParam('_dest') || $request->getRequest(2) || '');
     return $request->setStatusBadParams() unless $dest;
     my $wid = lc($wiim->id() || '');
-    if (_destPlayingRelay($dest, $wid)) {
-        _removeRelayTracks($dest, $wid);
-        _dlnaSetTarget(lc($dest->id() || ''), 0);
-        _diffuseForgetIfIdle($wiim);
+    if (_destPlayingRelay($dest, $wid) || _playlistHasRelay($dest, $wid)) {
+        _diffuseTurnOff($wiim, $dest);
         $request->setStatusDone();
         return;
     }
@@ -5647,6 +6206,24 @@ sub diffuseCommand {
         return $request->setStatusBadParams();
     }
     $request->setStatusDone();
+}
+
+sub castCommand {
+    my ($request) = @_;
+    my $wiim = $request->client();
+    return $request->setStatusBadParams() unless $wiim && _canAudioCast($wiim);
+    my $dest = _destById($request->getParam('_dest') || $request->getRequest(2) || '');
+    return $request->setStatusBadParams() unless $dest;
+    $request->setStatusProcessing();
+    _castStart($wiim, $dest, sub {
+        my $ok = shift;
+        if ($ok) {
+            $request->setStatusDone();
+        }
+        else {
+            $request->setStatusBadParams();
+        }
+    });
 }
 
 sub diffuseResetCommand {
@@ -5672,6 +6249,7 @@ sub _annotateDiffuseStatus {
     return unless $request && $client;
     my ($role, $source_name, $source_id, $dests) = ('', '', '', '');
     if (isWiimPlayer($client)) {
+        return if _diffuseSuppressed($client->id());
         my @rows = _diffuseActiveDests($client, 0);
         my @names = map { $_->{client}->name() || $_->{client}->id() } @rows;
         return unless @names || _diffuseSourceChanged($client);
@@ -5684,6 +6262,7 @@ sub _annotateDiffuseStatus {
         my $url = _dlnaCurrentUrl($client);
         my $wid = _relayWiimIdFromUrl($url);
         return unless $wid;
+        return if _diffuseSuppressed($wid);
         my $wiim = _wiimClientById($wid);
         $role = 'dest';
         $source_id = $wid;
@@ -5708,14 +6287,15 @@ sub lineoutsQuery {
     my $wid = lc($client->id() || '');
     my $to = _menuText($client, 'DLNA_OUTPUT_TO', 'To');
     my @items;
-    my $show_reset = _diffuseSourceChanged($client) ? 1 : 0;
+    my $hidden = _diffuseSuppressed($wid);
+    my $show_reset = (!$hidden && _diffuseSourceChanged($client)) ? 1 : 0;
 
     for my $mode (_lineoutModes($client)) {
         my $cmd = $mode->{cmd};
         my $isCurrent = (defined $current && $current ne '' && $cmd eq $current) ? 1 : 0;
         push @items, {
             id         => 'wiim_lineout_' . $cmd,
-            text       => $mode->{label} . ($isCurrent ? ' ✓' : ''),
+            text       => $mode->{label} . ($isCurrent ? " \x{2713}" : ''),
             icon_id    => $mode->{icon_id},
             radio      => $isCurrent,
             nextWindow => 'parent',
@@ -5732,13 +6312,13 @@ sub lineoutsQuery {
     for my $dest (_dlnaCandidates(1)) {
         my $did = lc($dest->id() || '');
         next unless $did;
-        my $on = _destPlayingRelay($dest, $wid) ? 1 : 0;
-        my $queued = $on || _playlistHasRelay($dest, $wid);
+        my $on = (!$hidden && _destPlayingRelay($dest, $wid)) ? 1 : 0;
+        my $queued = $on || (!$hidden && _playlistHasRelay($dest, $wid));
         $show_reset = 1 if $on || $queued;
         my $name = $dest->name() || $did;
         push @items, {
             id         => 'wiim_diffuse_' . $did,
-            text       => $to . ' ' . $name . ($on ? ' ✓' : ''),
+            text       => $to . ' ' . $name . ($on ? " \x{2713}" : ''),
             icon_id    => 'MTL_svg_stream',
             radio      => $on,
             nextWindow => 'parent',
@@ -5843,6 +6423,16 @@ sub getPresetUrls {
             { label => 'Repeat one',  url => _lmsJsonRpcUrl($mac, ['playlist', 'repeat', '1']) },
             { label => 'Repeat off',  url => _lmsJsonRpcUrl($mac, ['playlist', 'repeat', '0']) },
         );
+        if (_canAudioCast($client)) {
+            for my $dest (_dlnaCandidates(1)) {
+                my $did = lc($dest->id() || '');
+                next unless $did;
+                push @jsonrpc, {
+                    label => 'Cast to ' . ($dest->name() || $did),
+                    url   => _lmsJsonRpcUrl($mac, ['wiimintegration', 'cast', $did]),
+                };
+            }
+        }
         push @urls, {
             name         => $client->name(),
             ip           => $ip,

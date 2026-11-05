@@ -284,7 +284,14 @@ sub _on_ssdp {
     my $ip = inet_ntoa($addr);
     return unless $ip && $port;
     my $dest = pack_sockaddr_in($port, $addr);
-    send($fd, _search_response($st), 0, $dest);
+    # ssdp:all wants one reply per target, each with that ST. Rewriting the
+    # requested ST to MediaRenderer makes a rootdevice search ignore us.
+    my @sts = $st eq 'ssdp:all'
+        ? ('upnp:rootdevice', 'uuid:' . _uuid(), $DEV, $AVT, $CM, $RC)
+        : ($st);
+    for my $one (@sts) {
+        send($fd, _search_response($one), 0, $dest);
+    }
 }
 
 sub _search_matches {
@@ -320,7 +327,6 @@ sub _notify_alive {
 
 sub _search_response {
     my $st = shift || $DEV;
-    $st = $DEV if $st eq 'ssdp:all' || $st eq 'upnp:rootdevice';
     my $usn = ($st eq 'uuid:' . _uuid()) ? $st : 'uuid:' . _uuid() . '::' . $st;
     return _ssdp_headers(
         "HTTP/1.1 200 OK",
@@ -703,6 +709,7 @@ sub _send_notify {
         Blocking => 1,
     );
     return unless $sock;
+    $body = _bytes($body);
     my $req = "NOTIFY $path HTTP/1.1\r\n"
         . "HOST: $host:$port\r\n"
         . "CONTENT-TYPE: text/xml; charset=\"utf-8\"\r\n"
@@ -732,7 +739,7 @@ sub _device_xml {
 <manufacturerURL>https://lyrion.org/</manufacturerURL>
 <modelDescription>WiiM stream redistribution</modelDescription>
 <modelName>Wiim Integration</modelName>
-<modelNumber>1.0.49</modelNumber>
+<modelNumber>1.0.50</modelNumber>
 <UDN>uuid:$uuid</UDN>
 <serviceList>
 <service>
@@ -870,8 +877,16 @@ sub _http_xml {
     _http_text($http_client, $response, 200, 'text/xml; charset="utf-8"', $xml);
 }
 
+sub _bytes {
+    my $body = shift;
+    $body = '' unless defined $body;
+    utf8::encode($body) if utf8::is_utf8($body);
+    return $body;
+}
+
 sub _http_text {
     my ($http_client, $response, $code, $type, $body) = @_;
+    $body = _bytes($body);
     $response->code($code);
     $response->content_type($type);
     $response->header('Content-Length' => length($body));
