@@ -5,19 +5,19 @@
     <title lang="FR">Intégration WiiM</title>
   </details>
   <plugins>
-    <plugin name="WiimIntegration" version="1.0.50" minTarget="8.0" maxTarget="*">
+    <plugin name="WiimIntegration" version="1.0.51" minTarget="8.0" maxTarget="*">
       <title lang="EN">Wiim Integration</title>
       <title lang="FR">Intégration WiiM</title>
       <desc lang="EN">Full WiiM control in LMS: playback, presets, and DLNA redistribution to other Lyrion players.</desc>
       <desc lang="FR">Contrôle complet des WiiM dans LMS : lecture, préréglages et redistribution DLNA vers d'autres platines Lyrion.</desc>
-      <changes lang="EN">1.0.50: Listen and the Lyrion preset picker cast a WiiM that has DLNA output. Audio Pro A10 and C10 are left out. Stopping a cast restores the earlier volume.</changes>
-      <changes lang="FR">1.0.50 : Écouter et le sélecteur de préréglages diffusent un WiiM qui a une sortie DLNA. Les Audio Pro A10 et C10 sont exclus. L'arrêt remet le volume d'avant.</changes>
+      <changes lang="EN">1.0.51: While Spotify, Bluetooth, or AirPlay is playing, Lyrion follows the WiiM volume and does not write it back. The Lyrion slider still sets the level.</changes>
+      <changes lang="FR">1.0.51 : Pendant Spotify, Bluetooth ou AirPlay, Lyrion suit le volume du WiiM et ne le réécrit pas. Le curseur Lyrion règle encore le niveau.</changes>
       <category>tools</category>
       <creator>JS Arcand assisted by Grok</creator>
       <email>info@jsarcand.com</email>
       <link>https://github.com/jsarcand/WiimIntegration</link>
-      <url>https://raw.githubusercontent.com/jsarcand/WiimIntegration/v1.0.50/WiimIntegration-1.0.50.zip</url>
-      <sha>e4140091a68b729e4c51977985484601a05a2293</sha>
+      <url>https://raw.githubusercontent.com/jsarcand/WiimIntegration/v1.0.51/WiimIntegration-1.0.51.zip</url>
+      <sha>f9378980dc320472d1cd5841099f11c77044438f</sha>
     </plugin>
   </plugins>
 </extensions>

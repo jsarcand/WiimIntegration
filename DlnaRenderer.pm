@@ -739,7 +739,7 @@ sub _device_xml {
 <manufacturerURL>https://lyrion.org/</manufacturerURL>
 <modelDescription>WiiM stream redistribution</modelDescription>
 <modelName>Wiim Integration</modelName>
-<modelNumber>1.0.50</modelNumber>
+<modelNumber>1.0.51</modelNumber>
 <UDN>uuid:$uuid</UDN>
 <serviceList>
 <service>

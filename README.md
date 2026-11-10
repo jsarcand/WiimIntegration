@@ -4,7 +4,7 @@ Lyrion (LMS) plugin for WiiM players. It selects inputs and outputs, configures 
 
 The plugin gives a WiiM player a deeper place in Lyrion, closer to the capabilities and integration of a Squeezebox.
 
-Version 1.0.50.
+Version 1.0.51.
 
 [Lire en français](#français)
 
@@ -43,6 +43,8 @@ On a Lyrion player, Listen casts the WiiM with AudioCast. The WiiM app does not 
 
 Audio Pro A10 and C10 have no DLNA output, so they are not offered as sources. They can still receive a stream. Stopping the cast puts back the volume the amplifier had when the cast started.
 
+While Spotify, Bluetooth, or AirPlay is playing, the WiiM volume is the one that counts. Lyrion remembers it and does not send it back. The Lyrion slider still sets the level.
+
 ## Usage notes
 
 Spotify and TIDAL inputs configured on the WiiM are locked in the preset list, so reordering presets does not overwrite them. They can be deleted, then set up again as a Lyrion preset.
@@ -55,7 +57,7 @@ Plugin Lyrion (LMS) pour les lecteurs WiiM. Il permet de sélectionner les entr�
 
 Le plugin enrichit la platine WiiM d’une intégration poussée, pour lui donner des capacités et une place dans Lyrion au niveau d’un appareil Squeezebox.
 
-Version 1.0.50.
+Version 1.0.51.
 
 [Read in English](#wiim-integration)
 
@@ -93,6 +95,8 @@ La barre de lecture Material peut afficher cet état à partir du champ `wiim_di
 Sur une platine Lyrion, Écouter envoie le WiiM en AudioCast. L’application WiiM ne redemande pas de pairage. Le sélecteur de préréglages Lyrion liste ces platines sous Flux WiiM. Une ligne enregistre `wiimcast://` et l’adresse MAC. L’appui sur ce préréglage diffuse vers la platine qui possède l’emplacement.
 
 Les Audio Pro A10 et C10 n’ont pas de sortie DLNA, donc ils ne sont pas proposés comme sources. Ils peuvent toujours recevoir un flux. À l’arrêt, le volume de l’amplificateur revient à celui d’avant la diffusion.
+
+Pendant Spotify, Bluetooth ou AirPlay, c’est le volume du WiiM qui compte. Lyrion le retient et ne le renvoie pas. Le curseur Lyrion règle encore le niveau.
 
 ### Notes d’usage
 

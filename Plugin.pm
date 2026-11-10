@@ -148,7 +148,7 @@ my @LINEOUT_MODES = (
 );
 
 sub getDisplayName { 'PLUGIN_WIIMINTEGRATION' }
-sub getVersion     { '1.0.50' }
+sub getVersion     { '1.0.51' }
 
 # project / priv_prj from getStatusEx. Longer names are tested first.
 # Unknown projects keep the streamer jacks and omit HDMI, which the bitmask
@@ -1114,7 +1114,7 @@ sub initPlugin {
         refresh_on        => \&_dlnaRefreshOn,
         base_url          => \&_lmsListenBaseUrl,
     });
-    $log->warn("Wiim Integration v1.0.50 loaded");
+    $log->warn("Wiim Integration v1.0.51 loaded");
 
     foreach my $client (Slim::Player::Client::clients()) {
         _registerWiimPlayer($client);
@@ -2468,6 +2468,35 @@ sub _listeningVolume {
     return _clampVolume($vol);
 }
 
+# Material, Lyrion.app and the web UI come in through JSON-RPC.
+# A WiiM button, Spotify, or the squeezelite link does not.
+sub _controllerVolumeRequest {
+    my $request = shift || return 0;
+    my $src = eval { $request->source() };
+    return 1 if defined $src && !ref $src && $src eq 'JSONRPC';
+    return 0;
+}
+
+# Spotify / Bluetooth / AirPlay already moved the hardware. Remember the
+# level so the Lyrion slider catches up, and do not send it back.
+sub _adoptExternalVolume {
+    my ($client, $vol) = @_;
+    return 0 unless $client;
+    $vol = _clampVolume($vol);
+    my $id = $client->id();
+    return 0 if $playerState{$id}{volume_cast_freeze};
+
+    my $same = defined $playerState{$id}{volume} && $playerState{$id}{volume} == $vol;
+    $playerState{$id}{device_volume} = $vol;
+    $playerState{$id}{volume} = $vol;
+    delete $playerState{$id}{volume_target};
+    delete $playerState{$id}{volume_hold_until};
+    _setVolumePref($client, $vol);
+    return 0 if $same;
+    $log->info('Volume follows ' . ($client->name() || $id) . " at $vol");
+    return 1;
+}
+
 sub wiimMixerVolume {
     my ($request) = @_;
     my $client = $request->client() || return $request->setStatusBadParams();
@@ -2492,13 +2521,51 @@ sub wiimMixerVolume {
         return;
     }
 
+    my $from_ui = _controllerVolumeRequest($request);
+
+    # AudioCast reports the renderer's stored volume. Adopting it, or writing
+    # it back, puts that older level on the amp when the cast stops.
+    if ($playerState{$id}{volume_cast_freeze} && !$from_ui) {
+        $request->setStatusDone();
+        return;
+    }
+
+    my $parsed = _parseVolumeArg($arg);
+
+    # The device (Spotify, the WiiM remote, Bluetooth) is the master.
+    # Echoing setPlayerCmd here is what makes the two knobs chase.
+    unless ($from_ui) {
+        if ($parsed->{mode} eq 'absolute') {
+            my $vol = _clampVolume($parsed->{value});
+            my $hold   = $playerState{$id}{volume_hold_until} || 0;
+            my $target = $playerState{$id}{volume_target};
+            if (!(time() < $hold && defined $target && $vol != $target)) {
+                _adoptExternalVolume($client, $vol);
+            }
+        }
+        $request->setStatusDone();
+        return;
+    }
+
     my $cur = $playerState{$id}{volume_target};
-    $cur = $playerState{$id}{volume} if !defined $cur;
+    if (!defined $cur || time() >= ($playerState{$id}{volume_hold_until} || 0)) {
+        $cur = $playerState{$id}{device_volume};
+        $cur = $playerState{$id}{volume} if !defined $cur;
+    }
     $cur = $client->volume() if !defined $cur || $cur eq '';
     $cur = 0 unless defined $cur && $cur ne '';
 
-    my $parsed = _parseVolumeArg($arg);
     my $vol = $parsed->{mode} eq 'absolute' ? $parsed->{value} : $cur + $parsed->{value};
+    $vol = _clampVolume($vol);
+    if ($parsed->{mode} eq 'absolute'
+        && defined $playerState{$id}{device_volume}
+        && $vol == $playerState{$id}{device_volume}) {
+        _adoptExternalVolume($client, $vol);
+        $request->setStatusDone();
+        return;
+    }
+
+    $log->info('Volume from Lyrion on ' . ($client->name() || $id) . " -> $vol");
     _setWiimVolume($client, $vol);
     $request->setStatusDone();
 }
