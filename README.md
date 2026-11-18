@@ -1,4 +1,4 @@
-# Wiim Integration
+# LMS - Wiim Integration
 
 Lyrion (LMS) plugin for WiiM players. It selects inputs and outputs, configures presets from Lyrion, watches WiiM playback (including metadata retrieval) and controls it, and redistributes that audio over DLNA to other Lyrion players through a DLNA renderer.
 
